@@ -4,14 +4,14 @@
 LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
 // Pin definitions
-#define LEFT_SENSOR 1  // ANALOG
-#define RIGHT_SENSOR 2 // ANALOG
-#define BUTTON_INPUT 0 // ANALOG
-#define LEFT_MOTOR 11 // PWM
-#define RIGHT_MOTOR 3 // PWM
+#define LEFT_SENSOR 1   // ANALOG
+#define RIGHT_SENSOR 2  // ANALOG
+#define BUTTON_INPUT 0  // ANALOG
+#define LEFT_MOTOR 11   // PWM
+#define RIGHT_MOTOR 3   // PWM
 #define SENSOR_RESET 13 // DIGITAL
 
-// Keypad definitions
+// Keypad button definitions
 #define RIGHT  0
 #define UP     1
 #define DOWN   2
@@ -19,7 +19,7 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 #define SELECT 4
 #define NONE   5
 
-// LCD definitions
+// LCD cursor definitions
 #define TOP 0
 #define BOTTOM 1
 
@@ -123,15 +123,15 @@ void loop()
 }
 
 // Drains the capacitors on the peak detector so that can be read again
-void SensorReset(int microseconds = 25)
+void SensorReset(int microseconds = 10)
 {
-    digitalWrite(13, HIGH);
+    digitalWrite(SENSOR_RESET, HIGH);
     delayMicroseconds(microseconds);
-    digitalWrite(13, LOW);
-    delayMicroseconds(microseconds);
+    digitalWrite(SENSOR_RESET, LOW);
 }
 
-// Returns the current button being pressed
+// Returns the current button being pressed.
+// Can detect one button being pressed at a time.
 int ReadButton()
 {
     int value = analogRead(BUTTON_INPUT);   
@@ -144,42 +144,50 @@ int ReadButton()
     return NONE;
 }
 
+// Displays the menu on screen
 void ShowMenu()
 {
+    // Show menu item on top row
     Clear();
     Cursor(TOP, 0);
     Print(parameters[menuIndex].Name);
     Print(" ", parameters[menuIndex].Value);
 
+    // Show sensor info on bottom row. Useful for threshold calibration
+    Cursor(BOTTOM, 0);
+    Print("Sensors: ");
+    Print("L: ", left);
+    Print(" R: ", right);
+
     switch(ReadButton())
     {
-        case UP:
+        case UP:    // Increase item value
         parameters[menuIndex].Value++;
         break;
-        case DOWN:
+        case DOWN:  // Lower item value
         parameters[menuIndex].Value--;
         break;
-        case LEFT:
+        case LEFT:  // Next menu item
         menuIndex = (menuIndex > 0) ? (menuIndex - 1) : (PARAMETER_COUNT - 1);
         break;
-        case RIGHT:
+        case RIGHT: // Previous menu item
         menuIndex = (menuIndex < PARAMETER_COUNT - 1) ? (menuIndex + 1) : 0;
         break;
-        case SELECT:
-        delay(1000);
+        case SELECT:// Exit menu
+        delay(500);
         if (ReadButton() == SELECT)
         {
             Clear();
             Cursor(TOP, 0);
             Print("Exiting menu");
-            SaveToEEPROM();
-            delay(1000);
+            SaveToEEPROM(); // Save values to EEPROM before exiting
+            delay(750);
             MENU = false;
-            break;
+            return;
         }
         break;
     }
-    delay(150);
+    delay(150); 
 }
 
 // Loads all values from the EEPROM
@@ -200,10 +208,10 @@ void SaveToEEPROM()
 void Update()
 {   
     // Check if MENU button is being held down
-    if (ReadButton() == SELECT)
+    if ((MENU == false) && (ReadButton() == SELECT))
     {
-        delay(1000);
-        if (ReadButton() == SELECT)
+        delay(750);
+        if (ReadButton() == SELECT) // debounce MENU button
         {
             Clear();
             Cursor(TOP, 0);
@@ -217,14 +225,14 @@ void Update()
     right = analogRead(RIGHT_SENSOR);
     leftDetected = left > thresholdLeft.Value;
     rightDetected = right > thresholdRight.Value;
-    SensorReset();
+    SensorReset(); // Drain capacitor in preparation for next sensor reading
     lcdRefreshCount = (lcdRefreshCount <= 0) ? lcdRefreshPeriod : (lcdRefreshCount - 1);
 }
 
 // Calculates PID values for a single iteration of movement
 void ProcessMovement()
 {
-    if (leftDetected && rightDetected) error = 0;
+    if (leftDetected && rightDetected) error = 0; // No error if both sensors see the wire
     else if (!leftDetected && rightDetected) error = TOO_LEFT;
     else if (leftDetected && !rightDetected) error = TOO_RIGHT;
     else if (!leftDetected && !rightDetected) error = (previousError <= TOO_LEFT) ? -OFF_WIRE : OFF_WIRE;
