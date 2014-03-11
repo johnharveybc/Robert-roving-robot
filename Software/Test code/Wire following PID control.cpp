@@ -1,4 +1,5 @@
 #include <LiquidCrystal.h>
+#include <EEPROM.h>
 
 LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
@@ -27,43 +28,110 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 #define TOO_RIGHT 1
 #define OFF_WIRE 5
 
-// State tracking
-bool MENU = true;
+struct Parameter {
+    String Name;
+    byte Value;
+    int Index;
+}; 
+
+// Prevents LCD flicker
 int lcdRefreshCount = 0;
 int lcdRefreshPeriod = 200;
 
 // Sensors
-int thresholdLeft = 300;
+int left = 0;
+int right = 0;
 int leftDetected = false;
-int thresholdRight = 300;
 int rightDetected = false;
-
-int speed = 100.0;
-int error = 0.0;
-int previousError = 0.0;
 
 float proportional = 0.0;
 float integral = 0.0;
 float derivative = 0.0;
 int derivativeCounter = 0;
 
-int proportionalGain = 1.0;
-int integralGain = 1.0;
-int derivativeGain = 1.0;
+int error = 0.0;
+int previousError = 0.0;
 
+// State tracking
+bool MENU = true;
+int menuIndex = 0;
+
+// EEPROM values
+#define PARAMETER_COUNT 6 // MUST EQUAL NUMBER OF PARAMETERS
+Parameter proportionalGain  = {"P-gain",   0, 1}; 
+Parameter integralGain      = {"I-gain",   0, 2}; 
+Parameter derivativeGain    = {"D-gain",   0, 3}; 
+Parameter speed             = {"Speed",    0, 4}; 
+Parameter thresholdLeft     = {"L-Thresh", 0, 5}; 
+Parameter thresholdRight    = {"R-Thresh", 0, 6}; 
+
+// Make sure any EEPROM value is added to the array
+Parameter parameters[] = 
+{
+    proportionalGain, integralGain, derivativeGain,
+    speed, thresholdLeft, thresholdRight
+};
+
+// Clears the LCD screen
+void Clear()
+{
+    lcd.clear();
+}
+
+// Prints a string to the LCD display, with an optional numerical value beside it
+void Print(String text, int value = -1) 
+{
+    lcd.print(text);
+    if (value != -1) lcd.print(value);
+}
+
+// Changes the LCD cursor location
+void Cursor(int row, int column)
+{
+    lcd.setCursor(column, row);
+}
+
+// SETUP
 void setup()
 {
     lcd.begin(16, 2);   // Initialize LCD
     lcd.setCursor(0,0);
+    pinMode(SENSOR_RESET, OUTPUT);
+
+    // Parameters need to be loaded from EEPROM
+    LoadFromEEPROM();
+
+    // Intro text
+    Clear();
+    Cursor(TOP, 0);
+    Print("Fast Orange");
+    delay(1000);
 }
 
+// LOOP
 void loop()
 {
-    Update();
-    ProcessMovement();
-    delay(5);
+    if (MENU)
+    {
+        ShowMenu();
+    }
+    else
+    {
+        Update();
+        ProcessMovement();
+    }
 }
 
+// Drains the capacitors on the peak detector so that can be read again
+void SensorReset(int microseconds = 25)
+{
+    digitalWrite(13, HIGH);
+    delayMicroseconds(microseconds);
+    digitalWrite(13, LOW);
+    delayMicroseconds(microseconds);
+}
+
+// Returns the current button being pressed
 int ReadButton()
 {
     int value = analogRead(BUTTON_INPUT);   
@@ -76,39 +144,95 @@ int ReadButton()
     return NONE;
 }
 
-void Print(String text, int value = -1) 
+void ShowMenu()
 {
-    lcd.print(text);
-    if (value != -1) lcd.print(value);
+    Clear();
+    Cursor(TOP, 0);
+    Print(parameters[menuIndex].Name);
+    Print(" ", parameters[menuIndex].Value);
+
+    switch(ReadButton())
+    {
+        case UP:
+        parameters[menuIndex].Value++;
+        break;
+        case DOWN:
+        parameters[menuIndex].Value--;
+        break;
+        case LEFT:
+        menuIndex = (menuIndex > 0) ? (menuIndex - 1) : (PARAMETER_COUNT - 1);
+        break;
+        case RIGHT:
+        menuIndex = (menuIndex < PARAMETER_COUNT - 1) ? (menuIndex + 1) : 0;
+        break;
+        case SELECT:
+        delay(1000);
+        if (ReadButton() == SELECT)
+        {
+            Clear();
+            Cursor(TOP, 0);
+            Print("Exiting menu");
+            SaveToEEPROM();
+            delay(1000);
+            MENU = false;
+            break;
+        }
+        break;
+    }
+    delay(150);
 }
 
-void Cursor(int row, int column)
+// Loads all values from the EEPROM
+void LoadFromEEPROM()
 {
-    lcd.setCursor(column, row);
+    for(int i = 0; i < PARAMETER_COUNT; i++)
+        parameters[i].Value = EEPROM.read(parameters[i].Index);
 }
 
+// Saves all values to the EEPROM
+void SaveToEEPROM()
+{
+    for(int i = 0; i < PARAMETER_COUNT; i++)
+        EEPROM.write(parameters[i].Index, parameters[i].Value);
+}
+
+// Updates the sensors and machine state
 void Update()
 {   
-    if (ReadButton() == SELECT) MENU = true;
+    // Check if MENU button is being held down
+    if (ReadButton() == SELECT)
+    {
+        delay(1000);
+        if (ReadButton() == SELECT)
+        {
+            Clear();
+            Cursor(TOP, 0);
+            Print("Entering menu");
+            MENU = true;
+            delay(1000);
+        }
+    }
+
     left = analogRead(LEFT_SENSOR);
     right = analogRead(RIGHT_SENSOR);
-    leftDetected = left > thresholdLeft;
-    rightDetected = right > thresholdRight;
+    leftDetected = left > thresholdLeft.Value;
+    rightDetected = right > thresholdRight.Value;
     SensorReset();
     lcdRefreshCount = (lcdRefreshCount <= 0) ? lcdRefreshPeriod : (lcdRefreshCount - 1);
 }
 
+// Calculates PID values for a single iteration of movement
 void ProcessMovement()
 {
     if (leftDetected && rightDetected) error = 0;
     else if (!leftDetected && rightDetected) error = TOO_LEFT;
     else if (leftDetected && !rightDetected) error = TOO_RIGHT;
-    else if (!leftDetected && !rightDetected) error = (previousError <= TOO_LEFT) ? -OFF_TAPE : OFF_TAPE;
+    else if (!leftDetected && !rightDetected) error = (previousError <= TOO_LEFT) ? -OFF_WIRE : OFF_WIRE;
 
-    proportional = error * proportionalGain;
-    derivative = (error - previousError) / (float)derivativeCounter * derivativeGain;
-    MotorSpeed(LEFT_MOTOR, speed + (proportional + derivative));
-    MotorSpeed(RIGHT_MOTOR, speed - (proportional + derivative));
+    proportional = error * float(proportionalGain.Value);
+    derivative = (error - previousError) / float(derivativeCounter) * float(derivativeGain.Value);
+    MotorSpeed(LEFT_MOTOR, speed.Value + (proportional + derivative));
+    MotorSpeed(RIGHT_MOTOR, speed.Value - (proportional + derivative));
     
     if(previousError != error)
     {
@@ -125,19 +249,9 @@ void ProcessMovement()
     Print("R: ", right);
 }
 
+// Modifies the motor speed given a value between 0 and 100
 void MotorSpeed(int motor, int speed)
 {
     analogWrite(motor, speed/4);
 }
 
-void SensorReset(int microseconds = 10)
-{
-    digitalWrite(SENSOR_RESET, HIGH);
-    delayMicroseconds(microseconds);
-    digitalWrite(SENSOR_RESET, LOW);
-}
-
-void Clear()
-{
-    lcd.clear();
-}
