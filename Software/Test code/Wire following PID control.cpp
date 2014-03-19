@@ -3,13 +3,18 @@
 
 LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
+// Configuration
+#define SUBTRACTIVE_MOTOR_SPEED     // Comment for additive and subtractive motor speed
+#define CALCULATE_DERIVATIVE_ERROR  // Comment to remove derivative gain from error calculations
+
 // Pin definitions
-#define LEFT_SENSOR 1   // ANALOG
-#define RIGHT_SENSOR 2  // ANALOG
-#define BUTTON_INPUT 0  // ANALOG
-#define LEFT_MOTOR 11   // PWM
-#define RIGHT_MOTOR 3   // PWM
-#define SENSOR_RESET 13 // DIGITAL
+#define LEFT_SENSOR 2       // ANALOG
+#define RIGHT_SENSOR 1      // ANALOG
+#define BATTERY_SENSOR 3    // ANALOG
+#define BUTTON_INPUT 0      // ANALOG
+#define LEFT_MOTOR 11       // PWM
+#define RIGHT_MOTOR 3       // PWM
+#define SENSOR_RESET 2      // DIGITAL
 
 // Keypad button definitions
 #define RIGHT  0
@@ -66,10 +71,10 @@ Parameter thresholdLeft     = {"L-Thresh", 0, 5};
 Parameter thresholdRight    = {"R-Thresh", 0, 6}; 
 
 // Make sure any EEPROM value is added to the array
-Parameter parameters[] = 
+Parameter *parameters[] = 
 {
-    proportionalGain, integralGain, derivativeGain,
-    speed, thresholdLeft, thresholdRight
+    &proportionalGain, &integralGain, &derivativeGain,
+    &speed, &thresholdLeft, &thresholdRight
 };
 
 // Clears the LCD screen
@@ -94,9 +99,14 @@ void Cursor(int row, int column)
 // SETUP
 void setup()
 {
-    lcd.begin(16, 2);   // Initialize LCD
+    // Initialize LCD
+    lcd.begin(16, 2);   
     lcd.setCursor(0,0);
     pinMode(SENSOR_RESET, OUTPUT);
+
+    // Force motors off by default
+    MotorSpeed(LEFT_MOTOR, 0);
+    MotorSpeed(RIGHT_MOTOR, 0);
 
     // Parameters need to be loaded from EEPROM
     LoadFromEEPROM();
@@ -144,28 +154,35 @@ int ReadButton()
     return NONE;
 }
 
-// Displays the menu on screen
+// Variables used to modify rate of change of values in menu
+int previousButton = UP;
+int holdCounter = 0;
+
+// Display the menu on screen
 void ShowMenu()
 {
     // Show menu item on top row
     Clear();
     Cursor(TOP, 0);
-    Print(parameters[menuIndex].Name);
-    Print(" ", parameters[menuIndex].Value);
+    Print(parameters[menuIndex]->Name);
+    Print(" ", parameters[menuIndex]->Value);
 
     // Show sensor info on bottom row. Useful for threshold calibration
     Cursor(BOTTOM, 0);
-    Print("Sensors: ");
-    Print("L: ", left);
-    Print(" R: ", right);
+    Print("L: ", analogRead(LEFT_SENSOR));
+    Print(" R: ", analogRead(RIGHT_SENSOR));
 
     switch(ReadButton())
     {
         case UP:    // Increase item value
-        parameters[menuIndex].Value++;
+        holdCounter = (previousButton == UP) ? (holdCounter + 1) : 0;
+        previousButton = UP;
+        parameters[menuIndex]->Value += 1 + (holdCounter / 20);
         break;
         case DOWN:  // Lower item value
-        parameters[menuIndex].Value--;
+        holdCounter = (previousButton == DOWN) ? (holdCounter + 1) : 0;
+        previousButton = DOWN;
+        parameters[menuIndex]->Value += 1 + (holdCounter / 20);
         break;
         case LEFT:  // Next menu item
         menuIndex = (menuIndex > 0) ? (menuIndex - 1) : (PARAMETER_COUNT - 1);
@@ -194,14 +211,14 @@ void ShowMenu()
 void LoadFromEEPROM()
 {
     for(int i = 0; i < PARAMETER_COUNT; i++)
-        parameters[i].Value = EEPROM.read(parameters[i].Index);
+        parameters[i]->Value = EEPROM.read(parameters[i]->Index);
 }
 
 // Saves all values to the EEPROM
 void SaveToEEPROM()
 {
     for(int i = 0; i < PARAMETER_COUNT; i++)
-        EEPROM.write(parameters[i].Index, parameters[i].Value);
+        EEPROM.write(parameters[i]->Index, parameters[i]->Value);
 }
 
 // Updates the sensors and machine state
@@ -213,6 +230,10 @@ void Update()
         delay(750);
         if (ReadButton() == SELECT) // debounce MENU button
         {
+            // Stop motors before entering menu
+            MotorSpeed(LEFT_MOTOR, 0);
+            MotorSpeed(RIGHT_MOTOR, 0);
+            
             Clear();
             Cursor(TOP, 0);
             Print("Entering menu");
@@ -239,8 +260,25 @@ void ProcessMovement()
 
     proportional = error * float(proportionalGain.Value);
     derivative = (error - previousError) / float(derivativeCounter) * float(derivativeGain.Value);
-    MotorSpeed(LEFT_MOTOR, speed.Value + (proportional + derivative));
-    MotorSpeed(RIGHT_MOTOR, speed.Value - (proportional + derivative));
+    
+    int baseSpeed = (speed.Value * 4.0);
+    int mLeft  = baseSpeed + (proportional + derivative);
+    int mRight = baseSpeed - (proportional + derivative);
+
+    #ifndef CALCULATE_DERIVATIVE_ERROR
+        mLeft -= derivative;
+        mRight += derivative;
+    #endif
+
+    #ifdef SUBTRACTIVE_MOTOR_SPEED
+    if (mLeft > mRight) 
+        mLeft = baseSpeed;
+    else
+        mRight = baseSpeed;
+    #endif
+
+    MotorSpeed(LEFT_MOTOR, mLeft);
+    MotorSpeed(RIGHT_MOTOR, mRight);
     
     if(previousError != error)
     {
@@ -250,16 +288,23 @@ void ProcessMovement()
     else derivativeCounter++;
 
     if(lcdRefreshCount != 0) return; // Mitigates screen flicker
+
     Clear();
-    Cursor(TOP, 0);
+    // Sensors on top line
+    Cursor(TOP, 0); 
     Print("L: ", left);
+    Print(" R: ", right);
+
+    // Motor speed on bottom line
     Cursor(BOTTOM, 0);
-    Print("R: ", right);
+    Print("L: ", right);
+    Print("R: ", mLeft);
 }
 
 // Modifies the motor speed given a value between 0 and 100
 void MotorSpeed(int motor, int speed)
 {
-    analogWrite(motor, speed/4);
+	if (speed > 1000) speed = 1000;
+	else if (speed < 0) speed = 0;
+    analogWrite(motor, speed/4.0);
 }
-
