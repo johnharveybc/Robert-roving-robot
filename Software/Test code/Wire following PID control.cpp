@@ -123,6 +123,8 @@ void loop()
 {
     if (MENU)
     {
+        MotorSpeed(LEFT_MOTOR, 0);
+        MotorSpeed(RIGHT_MOTOR, 0);
         ShowMenu();
     }
     else
