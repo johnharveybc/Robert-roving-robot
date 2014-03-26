@@ -6,10 +6,12 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 // Configuration
 #define SUBTRACTIVE_MOTOR_SPEED     // Comment for additive and subtractive motor speed
 #define CALCULATE_DERIVATIVE_ERROR  // Comment to remove derivative gain from error calculations
+#define CALCULATE_INTEGRAL_ERROR    // Comment to remove integral gain from error calculations
+#define CALCULATE_ANALOG_PID        // Comment to calculate PID error using boolean logic instead of analog values
 
 // Pin definitions
-#define LEFT_SENSOR 2       // ANALOG
-#define RIGHT_SENSOR 1      // ANALOG
+#define LEFT_SENSOR 1       // ANALOG
+#define RIGHT_SENSOR 2      // ANALOG
 #define CENTER_SENSOR 3     // ANALOG
 #define BATTERY_SENSOR 4    // ANALOG
 #define BUTTON_INPUT 0      // ANALOG
@@ -42,7 +44,33 @@ enum state
     turnRight
 };
 
-struct Parameter {
+enum intersectionCommand
+{
+    straight,
+    leftTurn,
+    rightTurn,
+    stop
+};
+
+int intersections[] =
+{
+    straight,
+    straight,
+    straight,
+    straight,
+    straight,
+    leftTurn,
+    straight,
+    straight,
+    rightTurn,
+    straight,
+    straight,
+};
+#define INTERSECTION_COUNT (sizeof(intersections)/sizeof(int)) // MUST EQUAL NUMBER OF PARAMETERS
+int intersectionIndex = -1;
+
+struct Parameter 
+{
     String Name;
     byte Value;
     int Index;
@@ -55,44 +83,53 @@ int lcdRefreshPeriod = 200;
 // Prevents excess battery readings
 int batteryCount = 0;
 int batteryPeriod = 10000;
-int batteryVoltage = 0;
+volatile float batteryVoltage = 0.0;
 
 // Sensors
-int left = 0;
-int right = 0;
-int center = 0;
-int leftDetected = false;
-int rightDetected = false;
-int centerDetected = false;
+volatile int left = 0;
+volatile int right = 0;
+volatile int leftDetected = false;
+volatile int rightDetected = false;
+
+volatile int center = 0;
+volatile int centerNew = false;
+volatile int centerRisingEdge = false;
+volatile int centerHighDetected = false;
+volatile int centerLowDetected = false;
 
 float proportional = 0.0;
 float integral = 0.0;
 float derivative = 0.0;
 int derivativeCounter = 0;
+int integralOffsetPeriod = 50;
+int integralOffsetCounter = integralOffsetPeriod;
 
-int error = 0.0;
-int previousError = 0.0;
+float error = 0.0;
+float previousError = 0.0;
 
 // State tracking
 state currentState = menu;
 int menuIndex = 0;
 
 // EEPROM values
-#define PARAMETER_COUNT 6 // MUST EQUAL NUMBER OF PARAMETERS
-Parameter proportionalGain  = {"P-gain",   0, 1}; 
-Parameter integralGain      = {"I-gain",   0, 2}; 
-Parameter derivativeGain    = {"D-gain",   0, 3}; 
-Parameter speed             = {"Speed",    0, 4}; 
-Parameter thresholdLeft     = {"L-Thresh", 0, 5}; 
-Parameter thresholdRight    = {"R-Thresh", 0, 6}; 
-Parameter thresholdCenter   = {"C-Thresh", 0, 7};
+Parameter proportionalGain  = {"P-gain",      0, 1}; 
+Parameter integralGain      = {"I-gain",      0, 2}; 
+Parameter derivativeGain    = {"D-gain",      0, 3}; 
+Parameter speed             = {"Speed",       0, 4}; 
+Parameter thresholdLeft     = {"L-Thresh",    0, 5}; 
+Parameter thresholdRight    = {"R-Thresh",    0, 6}; 
+Parameter centerSchmittHigh = {"C-Schmitt H", 0, 7};
+Parameter centerSchmittLow  = {"C-Schmitt L", 0, 8};
+Parameter integralCap       = {"I-Cap",       0, 9};
 
 // Make sure any EEPROM value is added to the array
 Parameter *parameters[] = 
 {
     &proportionalGain, &integralGain, &derivativeGain,
-    &speed, &thresholdLeft, &thresholdRight, &thresholdCenter
+    &speed, &thresholdLeft, &thresholdRight, &centerSchmittHigh, 
+    &centerSchmittLow, &integralCap
 };
+#define PARAMETER_COUNT (sizeof(parameters)/sizeof(Parameter*)) // MUST EQUAL NUMBER OF PARAMETERS
 
 // Clears the LCD screen
 void Clear()
@@ -148,7 +185,16 @@ void loop()
 
         case moveStraight:
         Update();
-        ProcessMovement();
+        #ifdef CALCULATE_ANALOG_PID
+        ProcessMovementAnalog();
+        #else
+        ProcessMovementDigital();
+        #endif
+        break;
+
+        case turnLeft:
+        case turnRight:
+        Turn();
         break;
     }
 }
@@ -193,6 +239,7 @@ void ShowMenu()
     Print(" ", analogRead(LEFT_SENSOR));
     Print(" ", analogRead(RIGHT_SENSOR));
     Print(" ", analogRead(CENTER_SENSOR));
+    SensorReset();
 
     switch(ReadButton())
     {
@@ -204,7 +251,7 @@ void ShowMenu()
         case DOWN:  // Lower item value
         holdCounter = (previousButton == DOWN) ? (holdCounter + 1) : 0;
         previousButton = DOWN;
-        parameters[menuIndex]->Value += 1 + (holdCounter / 20);
+        parameters[menuIndex]->Value -= (1 + (holdCounter / 20));
         break;
         case LEFT:  // Next menu item
         menuIndex = (menuIndex > 0) ? (menuIndex - 1) : (PARAMETER_COUNT - 1);
@@ -244,58 +291,145 @@ void SaveToEEPROM()
         EEPROM.write(parameters[i]->Index, parameters[i]->Value);
 }
 
+void DisplaySensorValues()
+{
+    if(lcdRefreshCount == 0)  // Mitigates screen flicker and time consumping operations
+    {
+        // Sensors on top line
+        Cursor(TOP, 0); 
+        Print("L:", left);
+        Print(" R:", right);
+        Print(" C:", center);
+        Print("     ");
+        
+        Cursor(BOTTOM, 0);
+        Print("Intersection: ", intersectionIndex + 1);
+    }
+
+    
+    // Only update battery voltage once in a while
+    //if(batteryCount == 0)
+    //{
+    //    batteryVoltage = float(analogRead(BATTERY_SENSOR)) / 1024.0 * 5.0;
+        // Battery voltage on bottom line
+    //    Cursor(BOTTOM, 0);
+    //    Print("Batt: "); lcd.print(batteryVoltage); Print("V");
+    //}
+}
+
+void CenterUpdate()
+{
+    center = analogRead(CENTER_SENSOR);
+    centerHighDetected = center > centerSchmittHigh.Value;
+    centerLowDetected  = center > centerSchmittLow.Value;
+
+    if(!centerLowDetected)
+    {
+        centerNew = true;
+    }
+
+    if(centerNew && centerHighDetected)
+    {
+        delay(50);
+        if (analogRead(CENTER_SENSOR) > centerSchmittHigh.Value){
+        centerRisingEdge = true;
+        delay(50);
+        centerNew = false;
+        intersectionIndex++;
+        if (intersectionIndex == INTERSECTION_COUNT) 
+            intersectionIndex = 0;
+        
+        switch(intersections[intersectionIndex])
+        {
+            case straight:
+            currentState = moveStraight;
+            break;
+            case leftTurn:
+            currentState = turnLeft;
+            break;
+            case rightTurn:
+            currentState = turnRight;
+            break;
+        }}
+    }
+}
+
 // Updates the sensors and machine state
 void Update()
 {   
-    // Check if MENU button is being held down
     if ((currentState != menu) && (ReadButton() == SELECT))
     {
         delay(750);
-        if (ReadButton() == SELECT) // debounce MENU button
+        if(ReadButton() == SELECT) // debounce MENU button
         {
-            // Stop motors before entering menu
+        // Stop motors before entering menu
             MotorSpeed(LEFT_MOTOR, 0);
             MotorSpeed(RIGHT_MOTOR, 0);
-            
+
             Clear();
             Cursor(TOP, 0);
             Print("Entering menu");
             currentState = menu;
-            delay(1000);
+            delay(1000);       
         }
     }
 
+    // Read raw sensor values
     left = analogRead(LEFT_SENSOR);
     right = analogRead(RIGHT_SENSOR);
-    center = analogRead(CENTER_SENSOR);
-
     leftDetected = left > thresholdLeft.Value;
     rightDetected = right > thresholdRight.Value;
-    centerDetected = center > thresholdCenter.Value;
+    if (leftDetected || rightDetected)
+        CenterUpdate();
     SensorReset(); // Drain capacitor in preparation for next sensor reading
+
+    // Display values on LCD
     lcdRefreshCount = (lcdRefreshCount <= 0) ? lcdRefreshPeriod : (lcdRefreshCount - 1);
     batteryCount = (batteryCount <= 0) ? batteryPeriod : (batteryCount - 1);
+    DisplaySensorValues();   
 }
 
 // Calculates PID values for a single iteration of movement
-void ProcessMovement()
+void ProcessMovementDigital()
 {
     if (leftDetected && rightDetected) error = 0; // No error if both sensors see the wire
     else if (!leftDetected && rightDetected) error = TOO_LEFT;
     else if (leftDetected && !rightDetected) error = TOO_RIGHT;
     else if (!leftDetected && !rightDetected) error = (previousError <= TOO_LEFT) ? -OFF_WIRE : OFF_WIRE;
 
+    // Proportional
     proportional = error * float(proportionalGain.Value);
-    derivative = (error - previousError) / float(derivativeCounter) * float(derivativeGain.Value);
-    
-    int baseSpeed = (speed.Value * 4.0);
-    int mLeft  = baseSpeed + (proportional + derivative);
-    int mRight = baseSpeed - (proportional + derivative);
 
-    #ifndef CALCULATE_DERIVATIVE_ERROR
-    mLeft -= derivative;
-    mRight += derivative;
+    // Integral
+    #ifdef CALCULATE_INTEGRAL_ERROR    
+    if (integralOffsetCounter < 0)
+    {
+        integral += (error * integralGain.Value);
+        integralOffsetCounter = integralOffsetPeriod;
+    }
+    else
+    { 
+        integralOffsetCounter--;
+    }
+
+    if (integral > integralCap.Value) 
+        integral = integralCap.Value;
+    else if (integral < -integralCap.Value) 
+        integral = -integralCap.Value;
+    #else
+    integral = 0;
     #endif
+
+    // Derivative
+    #ifdef CALCULATE_DERIVATIVE_ERROR
+    derivative = (error - previousError) / float(derivativeCounter) * float(derivativeGain.Value);
+    #else
+    derivative = 0;
+    #endif
+
+    int baseSpeed = (speed.Value * 4.0);
+    int mLeft  = baseSpeed + (proportional + derivative + integral);
+    int mRight = baseSpeed - (proportional + derivative + integral);
 
     #ifdef SUBTRACTIVE_MOTOR_SPEED
     if (mLeft > mRight) 
@@ -313,21 +447,44 @@ void ProcessMovement()
         derivativeCounter = 1;
     }
     else derivativeCounter++;
+}
 
-    if(lcdRefreshCount == 0)  // Mitigates screen flicker and time consumping operations
-    {
-        // Sensors on top line
-        Cursor(TOP, 0); 
-        Print("L: ", left); Print("   ");
-        Print(" R: ", right); Print("   ");
-    }
+void ProcessMovementAnalog()
+{
+    if (!leftDetected && !rightDetected) error = (previousError <= 0) ? -500 : 500;
+    else error = float(left) - float(right);
+
+    // Proportional
+    proportional = error * float(proportionalGain.Value);
+    derivative = (error - previousError) * float(derivativeGain.Value) / 50.0;
+    integral += (error * float(integralGain.Value)) / 50.0;
     
-    if(batteryCount == 0) return;
-    {
-        // Battery voltage on bottom line
-        Cursor(BOTTOM, 0);
-        Print("Batt: ", batteryVoltage); Print("    ");
-    }  
+    if (integral > integralCap.Value) 
+        integral = integralCap.Value;
+    else if (integral < -integralCap.Value) 
+        integral = -integralCap.Value;
+
+    #ifndef CALCULATE_INTEGRAL_ERROR
+    integral = 0;
+    #endif;
+
+    #ifndef CALCULATE_DERIVATIVE_ERROR
+    derivative = 0;
+    #endif;
+
+    int baseSpeed = (speed.Value * 4.0);
+    int mLeft  = baseSpeed + (proportional + derivative + integral);
+    int mRight = baseSpeed - (proportional + derivative + integral);
+
+    #ifdef SUBTRACTIVE_MOTOR_SPEED
+    if (mLeft > mRight) 
+        mLeft = baseSpeed;
+    else
+        mRight = baseSpeed;
+    #endif
+
+    MotorSpeed(LEFT_MOTOR, mLeft);
+    MotorSpeed(RIGHT_MOTOR, mRight);
 }
 
 // Modifies the motor speed given a value between 0 and 100
@@ -337,3 +494,41 @@ void MotorSpeed(int motor, int speed)
 	else if (speed < 0) speed = 0;
     analogWrite(motor, speed/4.0);
 }
+
+void Turn()
+{
+    int direction;
+    if (currentState == turnLeft) direction = 1;
+    else if (currentState == turnRight) direction = -1;
+    else return;
+
+    Clear();
+    Print("TURN");
+
+    // Move past intersection a small amount
+    
+    MotorSpeed(LEFT_MOTOR, 300);
+    MotorSpeed(RIGHT_MOTOR, 300);
+    delay(400);
+    /*
+    // Turn until the line has been lost
+    MotorSpeed(LEFT_MOTOR, direction * 100);
+    MotorSpeed(RIGHT_MOTOR, -direction * 100);
+    do
+    {
+        left = analogRead(LEFT_SENSOR);
+        right = analogRead(RIGHT_SENSOR);
+        leftDetected = left > thresholdLeft.Value;
+        rightDetected = right > thresholdRight.Value;
+        SensorReset();
+    } while (leftDetected || rightDetected);*/
+
+        MotorSpeed(LEFT_MOTOR, 500 * direction);
+        MotorSpeed(RIGHT_MOTOR, 500 * -direction);
+        delay(400);
+
+        previousError = direction;
+        currentState = moveStraight;
+
+        Clear();
+    }
