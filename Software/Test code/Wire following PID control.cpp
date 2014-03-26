@@ -10,7 +10,8 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 // Pin definitions
 #define LEFT_SENSOR 2       // ANALOG
 #define RIGHT_SENSOR 1      // ANALOG
-#define BATTERY_SENSOR 3    // ANALOG
+#define CENTER_SENSOR 3     // ANALOG
+#define BATTERY_SENSOR 4    // ANALOG
 #define BUTTON_INPUT 0      // ANALOG
 #define LEFT_MOTOR 11       // PWM
 #define RIGHT_MOTOR 3       // PWM
@@ -33,6 +34,14 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 #define TOO_RIGHT 1
 #define OFF_WIRE 5
 
+enum state
+{
+    menu,
+    moveStraight,
+    turnLeft,
+    turnRight
+};
+
 struct Parameter {
     String Name;
     byte Value;
@@ -42,6 +51,11 @@ struct Parameter {
 // Prevents LCD flicker
 int lcdRefreshCount = 0;
 int lcdRefreshPeriod = 200;
+
+// Prevents excess battery readings
+int batteryCount = 0;
+int batteryPeriod = 10000;
+int batteryVoltage = 0;
 
 // Sensors
 int left = 0;
@@ -58,7 +72,7 @@ int error = 0.0;
 int previousError = 0.0;
 
 // State tracking
-bool MENU = true;
+state currentState = menu;
 int menuIndex = 0;
 
 // EEPROM values
@@ -121,16 +135,18 @@ void setup()
 // LOOP
 void loop()
 {
-    if (MENU)
+    switch(currentState)
     {
+        case menu:
         MotorSpeed(LEFT_MOTOR, 0);
         MotorSpeed(RIGHT_MOTOR, 0);
         ShowMenu();
-    }
-    else
-    {
+        break;
+
+        case moveStraight:
         Update();
         ProcessMovement();
+        break;
     }
 }
 
@@ -201,7 +217,8 @@ void ShowMenu()
             Print("Exiting menu");
             SaveToEEPROM(); // Save values to EEPROM before exiting
             delay(750);
-            MENU = false;
+            currentState = moveStraight;
+            Clear();
             return;
         }
         break;
@@ -227,7 +244,7 @@ void SaveToEEPROM()
 void Update()
 {   
     // Check if MENU button is being held down
-    if ((MENU == false) && (ReadButton() == SELECT))
+    if ((currentState != menu) && (ReadButton() == SELECT))
     {
         delay(750);
         if (ReadButton() == SELECT) // debounce MENU button
@@ -239,7 +256,7 @@ void Update()
             Clear();
             Cursor(TOP, 0);
             Print("Entering menu");
-            MENU = true;
+            currentState = menu;
             delay(1000);
         }
     }
@@ -250,6 +267,7 @@ void Update()
     rightDetected = right > thresholdRight.Value;
     SensorReset(); // Drain capacitor in preparation for next sensor reading
     lcdRefreshCount = (lcdRefreshCount <= 0) ? lcdRefreshPeriod : (lcdRefreshCount - 1);
+    batteryCount = (batteryCount <= 0) ? batteryPeriod : (batteryCount - 1);
 }
 
 // Calculates PID values for a single iteration of movement
@@ -268,8 +286,8 @@ void ProcessMovement()
     int mRight = baseSpeed - (proportional + derivative);
 
     #ifndef CALCULATE_DERIVATIVE_ERROR
-        mLeft -= derivative;
-        mRight += derivative;
+    mLeft -= derivative;
+    mRight += derivative;
     #endif
 
     #ifdef SUBTRACTIVE_MOTOR_SPEED
@@ -289,18 +307,20 @@ void ProcessMovement()
     }
     else derivativeCounter++;
 
-    if(lcdRefreshCount != 0) return; // Mitigates screen flicker
-
-    Clear();
-    // Sensors on top line
-    Cursor(TOP, 0); 
-    Print("L: ", left);
-    Print(" R: ", right);
-
-    // Motor speed on bottom line
-    Cursor(BOTTOM, 0);
-    Print("L: ", right);
-    Print("R: ", mLeft);
+    if(lcdRefreshCount == 0)  // Mitigates screen flicker and time consumping operations
+    {
+        // Sensors on top line
+        Cursor(TOP, 0); 
+        Print("L: ", left); Print("   ");
+        Print(" R: ", right); Print("   ");
+    }
+    
+    if(batteryCount == 0) return;
+    {
+        // Battery voltage on bottom line
+        Cursor(BOTTOM, 0);
+        Print("Batt: ", batteryVoltage); Print("    ");
+    }  
 }
 
 // Modifies the motor speed given a value between 0 and 100
