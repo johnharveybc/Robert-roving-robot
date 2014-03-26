@@ -60,8 +60,10 @@ int batteryVoltage = 0;
 // Sensors
 int left = 0;
 int right = 0;
+int center = 0;
 int leftDetected = false;
 int rightDetected = false;
+int centerDetected = false;
 
 float proportional = 0.0;
 float integral = 0.0;
@@ -83,12 +85,13 @@ Parameter derivativeGain    = {"D-gain",   0, 3};
 Parameter speed             = {"Speed",    0, 4}; 
 Parameter thresholdLeft     = {"L-Thresh", 0, 5}; 
 Parameter thresholdRight    = {"R-Thresh", 0, 6}; 
+Parameter thresholdCenter   = {"C-Thresh", 0, 7};
 
 // Make sure any EEPROM value is added to the array
 Parameter *parameters[] = 
 {
     &proportionalGain, &integralGain, &derivativeGain,
-    &speed, &thresholdLeft, &thresholdRight
+    &speed, &thresholdLeft, &thresholdRight, &thresholdCenter
 };
 
 // Clears the LCD screen
@@ -187,8 +190,9 @@ void ShowMenu()
 
     // Show sensor info on bottom row. Useful for threshold calibration
     Cursor(BOTTOM, 0);
-    Print("L: ", analogRead(LEFT_SENSOR));
-    Print(" R: ", analogRead(RIGHT_SENSOR));
+    Print(" ", analogRead(LEFT_SENSOR));
+    Print(" ", analogRead(RIGHT_SENSOR));
+    Print(" ", analogRead(CENTER_SENSOR));
 
     switch(ReadButton())
     {
@@ -263,8 +267,11 @@ void Update()
 
     left = analogRead(LEFT_SENSOR);
     right = analogRead(RIGHT_SENSOR);
+    center = analogRead(CENTER_SENSOR);
+
     leftDetected = left > thresholdLeft.Value;
     rightDetected = right > thresholdRight.Value;
+    centerDetected = center > thresholdCenter.Value;
     SensorReset(); // Drain capacitor in preparation for next sensor reading
     lcdRefreshCount = (lcdRefreshCount <= 0) ? lcdRefreshPeriod : (lcdRefreshCount - 1);
     batteryCount = (batteryCount <= 0) ? batteryPeriod : (batteryCount - 1);
