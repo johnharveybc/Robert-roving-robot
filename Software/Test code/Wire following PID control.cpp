@@ -1,6 +1,6 @@
+#include <SimpleTimer.h>
 #include <LiquidCrystal.h>
 #include <EEPROM.h>
-#include <SimpleTimer.h>
 
 LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
@@ -21,8 +21,8 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 #define LEFT_MOTOR 11       // PWM
 #define RIGHT_MOTOR 3       // PWM
 #define SENSOR_RESET 2      // DIGITAL
-#define LEFT_TURN_LED 0     // DIGITAL
-#define RIGHT_TURN_LED 1    // DIGITAL
+#define LEFT_TURN_LED 12     // DIGITAL
+#define RIGHT_TURN_LED 13    // DIGITAL
 
 // Keypad button definitions
 #define RIGHT  0
@@ -42,7 +42,7 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 #define OFF_WIRE 5
 
 // Turn indicator LEDs
-turnSignalTimer timer;
+SimpleTimer turnSignalTimer;
 bool turnSignalState = false;
 
 enum state
@@ -62,7 +62,7 @@ struct Parameter
 
 // Prevents LCD flicker
 int lcdRefreshCount = 0;
-int lcdRefreshPeriod = 300;
+int lcdRefreshPeriod = 200;
 
 // Prevents excess battery readings
 int batteryCount = 0;
@@ -79,7 +79,7 @@ volatile int rightDetected = false;
 #define INTERSECTION_COUNT_LEFT 3
 #define INTERSECTION_COUNT_RIGHT 2
 #define INTERSECTION_COUNT_ORIGIN 4
-int centerTimeoutLimit = 400;
+int centerTimeoutLimit = 300;
 volatile int center = 0;
 volatile int centerOldHigh = false;
 volatile int intersectionSignalRecent = 0;
@@ -208,7 +208,7 @@ void setup()
     pinMode(RIGHT_TURN_LED, OUTPUT);
     digitalWrite(LEFT_TURN_LED, 0);
     digitalWrite(RIGHT_TURN_LED, 0);
-    turnSignalTimer.setInterval(250, TurnSignal);
+    turnSignalTimer.setInterval(100, TurnSignal);
 
     // Force motors off by default
     MotorSpeed(LEFT_MOTOR, 0);
@@ -220,7 +220,13 @@ void setup()
     // Intro text
     Clear();
     Cursor(TOP, 0);
-    Print("Fast Orange");
+    Print("FAST ORANGE");
+    Cursor(BOTTOM, 0);
+    #ifdef DEBUG_MODE
+    Print("Debug Mode");
+    #else
+    Print("Race Mode");
+    #endif
     delay(1000);
 
     currentState = menu;
@@ -325,6 +331,7 @@ void ShowMenu()
             SaveToEEPROM(); // Save values to EEPROM before exiting
             delay(750);
             currentState = moveStraight;
+            ClockToggle();
             Clear();
             return;
         }
@@ -361,11 +368,12 @@ void DisplaySensorValues()
 
         Cursor(BOTTOM, 0);
 
-            #ifdef USE_SMART_INTERSECTIONS
+        #ifdef USE_SMART_INTERSECTIONS
         Print("Signal: ", intersectionTurnFlag);
-            #else
+        #else
         Print("Intersection: ", intersectionIndex + 1);
-            #endif
+        #endif
+        
         #else
         Cursor(TOP, 0); Print("                "); Cursor(TOP, 0);
         Print("Time: "); lcd.print(Clock()/1000.0); Print("s");
@@ -485,7 +493,8 @@ void Update()
             Cursor(TOP, 0);
             Print("Entering menu");
             currentState = menu;
-            delay(1000);       
+            delay(1000);
+            ClockReset();    
         }
     }
 
@@ -645,8 +654,8 @@ void Turn()
     } while (leftDetected || rightDetected);
     */
 
-    MotorSpeed(LEFT_MOTOR, 500 * direction);
-    MotorSpeed(RIGHT_MOTOR, 500 * -direction);
+    MotorSpeed(LEFT_MOTOR, 1000 * direction);
+    MotorSpeed(RIGHT_MOTOR, 1000 * -direction);
     delay(400);
 
     previousError = direction;
