@@ -8,6 +8,7 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 #define CALCULATE_DERIVATIVE_ERROR  // Comment to remove derivative gain from error calculations
 #define CALCULATE_INTEGRAL_ERROR    // Comment to remove integral gain from error calculations
 #define CALCULATE_ANALOG_PID        // Comment to calculate PID error using boolean logic instead of analog values
+#define USE_SMART_INTERSECTIONS     // Comment to use the intersection map instead of sensing intersection signals
 
 // Pin definitions
 #define LEFT_SENSOR 1       // ANALOG
@@ -44,6 +45,40 @@ enum state
     turnRight
 };
 
+struct Parameter 
+{
+    String Name;
+    byte Value;
+    int Index;
+}; 
+
+// Prevents LCD flicker
+int lcdRefreshCount = 0;
+int lcdRefreshPeriod = 200;
+
+// Prevents excess battery readings
+int batteryCount = 0;
+int batteryPeriod = 10000;
+volatile float batteryVoltage = 0.0;
+
+// Sensors
+volatile int left = 0;
+volatile int right = 0;
+volatile int leftDetected = false;
+volatile int rightDetected = false;
+
+// Smart intersection detection
+#define INTERSECTION_COUNT_LEFT 2
+#define INTERSECTION_COUNT_RIGHT 3
+#define INTERSECTION_COUNT_ORIGIN 4
+int centerTimeoutLimit = 500;
+volatile int center = 0;
+volatile int centerOldHigh = false;
+volatile int intersectionSignalRecent = 0;
+volatile int centerTimeoutCount = 0;
+volatile int intersectionTurnFlag = 0;
+
+// Mapped intersection detection
 enum intersectionCommand
 {
     straight,
@@ -68,35 +103,12 @@ int intersections[] =
 };
 #define INTERSECTION_COUNT (sizeof(intersections)/sizeof(int)) // MUST EQUAL NUMBER OF PARAMETERS
 int intersectionIndex = -1;
-
-struct Parameter 
-{
-    String Name;
-    byte Value;
-    int Index;
-}; 
-
-// Prevents LCD flicker
-int lcdRefreshCount = 0;
-int lcdRefreshPeriod = 200;
-
-// Prevents excess battery readings
-int batteryCount = 0;
-int batteryPeriod = 10000;
-volatile float batteryVoltage = 0.0;
-
-// Sensors
-volatile int left = 0;
-volatile int right = 0;
-volatile int leftDetected = false;
-volatile int rightDetected = false;
-
-volatile int center = 0;
 volatile int centerNew = false;
 volatile int centerRisingEdge = false;
 volatile int centerHighDetected = false;
 volatile int centerLowDetected = false;
 
+// Control
 float proportional = 0.0;
 float integral = 0.0;
 float derivative = 0.0;
@@ -178,23 +190,23 @@ void loop()
     switch(currentState)
     {
         case menu:
-        MotorSpeed(LEFT_MOTOR, 0);
-        MotorSpeed(RIGHT_MOTOR, 0);
-        ShowMenu();
+            MotorSpeed(LEFT_MOTOR, 0);
+            MotorSpeed(RIGHT_MOTOR, 0);
+            ShowMenu();
         break;
 
         case moveStraight:
-        Update();
-        #ifdef CALCULATE_ANALOG_PID
-        ProcessMovementAnalog();
-        #else
-        ProcessMovementDigital();
-        #endif
+            Update();
+            #ifdef CALCULATE_ANALOG_PID
+            ProcessMovementAnalog();
+            #else
+            ProcessMovementDigital();
+            #endif
         break;
 
         case turnLeft:
         case turnRight:
-        Turn();
+            Turn();
         break;
     }
 }
@@ -293,7 +305,7 @@ void SaveToEEPROM()
 
 void DisplaySensorValues()
 {
-    if(lcdRefreshCount == 0)  // Mitigates screen flicker and time consumping operations
+    if(lcdRefreshCount == 0)  // Mitigates screen flicker and time consuming operations
     {
         // Sensors on top line
         Cursor(TOP, 0); 
@@ -303,7 +315,12 @@ void DisplaySensorValues()
         Print("     ");
         
         Cursor(BOTTOM, 0);
-        Print("Intersection: ", intersectionIndex + 1);
+
+        #ifdef USE_SMART_INTERSECTIONS
+            Print("Signal: ", intersectionTurnFlag);
+        #else
+            Print("Intersection: ", intersectionIndex + 1);
+        #endif
     }
 
     
@@ -317,7 +334,8 @@ void DisplaySensorValues()
     //}
 }
 
-void CenterUpdate()
+
+void CenterMapUpdate()
 {
     center = analogRead(CENTER_SENSOR);
     centerHighDetected = center > centerSchmittHigh.Value;
@@ -331,26 +349,78 @@ void CenterUpdate()
     if(centerNew && centerHighDetected)
     {
         delay(50);
-        if (analogRead(CENTER_SENSOR) > centerSchmittHigh.Value){
-        centerRisingEdge = true;
-        delay(50);
-        centerNew = false;
-        intersectionIndex++;
-        if (intersectionIndex == INTERSECTION_COUNT) 
-            intersectionIndex = 0;
-        
-        switch(intersections[intersectionIndex])
+        if (analogRead(CENTER_SENSOR) > centerSchmittHigh.Value)
         {
-            case straight:
-            currentState = moveStraight;
-            break;
-            case leftTurn:
-            currentState = turnLeft;
-            break;
-            case rightTurn:
-            currentState = turnRight;
-            break;
-        }}
+            centerRisingEdge = true;
+            delay(50);
+            centerNew = false;
+            intersectionIndex++;
+            if (intersectionIndex == INTERSECTION_COUNT) 
+                intersectionIndex = 0;
+            
+            switch(intersections[intersectionIndex])
+            {
+                case straight:
+                currentState = moveStraight;
+                break;
+                case leftTurn:
+                currentState = turnLeft;
+                break;
+                case rightTurn:
+                currentState = turnRight;
+                break;
+            }
+        }
+    }
+}
+
+void CenterSmartUpdate()
+{
+    center = analogRead(CENTER_SENSOR);
+
+    if (centerTimeoutCount)
+        centerTimeoutCount += 1;
+
+    if (!centerOldHigh && (center > centerSchmittHigh.Value)) // On switch-to-high
+    {
+        centerOldHigh = true; // Switch current center state to high
+
+        if((intersectionSignalRecent + 1) == INTERSECTION_COUNT_ORIGIN) // If the start/stop signal is encountered, toggle clock.
+        // This is done on when it switches high (instead of waiting for timeout) to save a bit of clock-time.
+        {
+            //toggleClock();
+        }
+
+        switch(intersectionTurnFlag)
+        {
+            case INTERSECTION_COUNT_LEFT: // First intersection after left signal
+                currentState = turnLeft;
+                break;
+            case INTERSECTION_COUNT_RIGHT: // First intersection after right signal
+                currentState = turnRight;
+                break;
+            default: // Else
+                currentState = moveStraight;
+                intersectionSignalRecent += 1;
+                break;
+        }
+
+        centerTimeoutCount = 0; // Stop timeout counter
+        intersectionTurnFlag = 0; // Reset flag
+    }
+    else if (centerOldHigh && (center < centerSchmittLow.Value)) // On switch-to-low
+    {
+        centerOldHigh = false; // Swtich current center state to low
+        centerTimeoutCount = 1; // Start timeout counter
+    }
+
+    if (centerTimeoutCount >= centerTimeoutLimit) // Timeout
+    {
+        if (intersectionTurnFlag < intersectionSignalRecent) // Do not let false signals effect the flag
+            intersectionTurnFlag = intersectionSignalRecent; // Set flag
+
+        intersectionSignalRecent = 0; // Reset signal counter
+        centerTimeoutCount = 0; // Stop timeout counter
     }
 }
 
@@ -380,7 +450,13 @@ void Update()
     leftDetected = left > thresholdLeft.Value;
     rightDetected = right > thresholdRight.Value;
     if (leftDetected || rightDetected)
-        CenterUpdate();
+    {
+        #ifdef USE_SMART_INTERSECTIONS
+        CenterSmartUpdate();
+        #else
+        CenterMapUpdate();
+        #endif
+    }
     SensorReset(); // Drain capacitor in preparation for next sensor reading
 
     // Display values on LCD
@@ -510,6 +586,7 @@ void Turn()
     MotorSpeed(LEFT_MOTOR, 300);
     MotorSpeed(RIGHT_MOTOR, 300);
     delay(400);
+
     /*
     // Turn until the line has been lost
     MotorSpeed(LEFT_MOTOR, direction * 100);
@@ -521,14 +598,15 @@ void Turn()
         leftDetected = left > thresholdLeft.Value;
         rightDetected = right > thresholdRight.Value;
         SensorReset();
-    } while (leftDetected || rightDetected);*/
+    } while (leftDetected || rightDetected);
+    */
 
-        MotorSpeed(LEFT_MOTOR, 500 * direction);
-        MotorSpeed(RIGHT_MOTOR, 500 * -direction);
-        delay(400);
+    MotorSpeed(LEFT_MOTOR, 500 * direction);
+    MotorSpeed(RIGHT_MOTOR, 500 * -direction);
+    delay(400);
 
-        previousError = direction;
-        currentState = moveStraight;
+    previousError = direction;
+    currentState = moveStraight;
 
-        Clear();
-    }
+    Clear();
+}
