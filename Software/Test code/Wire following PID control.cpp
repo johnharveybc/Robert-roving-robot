@@ -1,5 +1,6 @@
 #include <LiquidCrystal.h>
 #include <EEPROM.h>
+#include <SimpleTimer.h>
 
 LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
@@ -20,6 +21,8 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 #define LEFT_MOTOR 11       // PWM
 #define RIGHT_MOTOR 3       // PWM
 #define SENSOR_RESET 2      // DIGITAL
+#define LEFT_TURN_LED 0     // DIGITAL
+#define RIGHT_TURN_LED 1    // DIGITAL
 
 // Keypad button definitions
 #define RIGHT  0
@@ -37,6 +40,10 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 #define TOO_LEFT -1
 #define TOO_RIGHT 1
 #define OFF_WIRE 5
+
+// Turn indicator LEDs
+turnSignalTimer timer;
+bool turnSignalState = false;
 
 enum state
 {
@@ -149,6 +156,26 @@ Parameter *parameters[] =
 };
 #define PARAMETER_COUNT (sizeof(parameters)/sizeof(Parameter*)) // MUST EQUAL NUMBER OF PARAMETERS
 
+void TurnSignal()
+{
+    if (intersectionTurnFlag == INTERSECTION_COUNT_LEFT)
+    {
+        digitalWrite(LEFT_TURN_LED, turnSignalState);
+        digitalWrite(RIGHT_TURN_LED, 0);
+    }
+    else if (intersectionTurnFlag == INTERSECTION_COUNT_RIGHT)
+    {   
+        digitalWrite(LEFT_TURN_LED, 0);
+        digitalWrite(RIGHT_TURN_LED, turnSignalState);
+    }
+    else
+    {
+        digitalWrite(LEFT_TURN_LED, 0);
+        digitalWrite(RIGHT_TURN_LED, 0);
+    }
+    turnSignalState = !turnSignalState;
+}
+
 // Clears the LCD screen
 void Clear()
 {
@@ -175,6 +202,13 @@ void setup()
     lcd.begin(16, 2);   
     lcd.setCursor(0,0);
     pinMode(SENSOR_RESET, OUTPUT);
+    
+    // Turn signals
+    pinMode(LEFT_TURN_LED, OUTPUT);
+    pinMode(RIGHT_TURN_LED, OUTPUT);
+    digitalWrite(LEFT_TURN_LED, 0);
+    digitalWrite(RIGHT_TURN_LED, 0);
+    turnSignalTimer.setInterval(250, TurnSignal);
 
     // Force motors off by default
     MotorSpeed(LEFT_MOTOR, 0);
@@ -199,25 +233,26 @@ void loop()
     switch(currentState)
     {
         case menu:
-            MotorSpeed(LEFT_MOTOR, 0);
-            MotorSpeed(RIGHT_MOTOR, 0);
-            ShowMenu();
+        MotorSpeed(LEFT_MOTOR, 0);
+        MotorSpeed(RIGHT_MOTOR, 0);
+        ShowMenu();
         break;
 
         case moveStraight:
-            Update();
+        Update();
             #ifdef CALCULATE_ANALOG_PID
-            ProcessMovementAnalog();
+        ProcessMovementAnalog();
             #else
-            ProcessMovementDigital();
+        ProcessMovementDigital();
             #endif
         break;
 
         case turnLeft:
         case turnRight:
-            Turn();
+        Turn();
         break;
     }
+    turnSignalTimer.run();
 }
 
 // Drains the capacitors on the peak detector so that can be read again
@@ -318,28 +353,28 @@ void DisplaySensorValues()
     {
         #ifdef DEBUG_MODE
             // Sensors on top line
-            Cursor(TOP, 0); 
-            Print("L:", left);
-            Print(" R:", right);
-            Print(" C:", center);
-            Print("     ");
-            
-            Cursor(BOTTOM, 0);
+        Cursor(TOP, 0); 
+        Print("L:", left);
+        Print(" R:", right);
+        Print(" C:", center);
+        Print("     ");
+
+        Cursor(BOTTOM, 0);
 
             #ifdef USE_SMART_INTERSECTIONS
-                Print("Signal: ", intersectionTurnFlag);
+        Print("Signal: ", intersectionTurnFlag);
             #else
-                Print("Intersection: ", intersectionIndex + 1);
+        Print("Intersection: ", intersectionIndex + 1);
             #endif
         #else
-            Cursor(TOP, 0); Print("                "); Cursor(TOP, 0);
-            Print("Time: "); lcd.print(Clock()/1000.0); Print("s");
-            if(batteryCount == 0)
-            {
-                Cursor(BOTTOM, 0);
-                batteryVoltage = float(analogRead(BATTERY_SENSOR)) / 1024.0 * 5.0;
-                Print("Battery: "); lcd.print(batteryVoltage); Print("V");
-            }
+        Cursor(TOP, 0); Print("                "); Cursor(TOP, 0);
+        Print("Time: "); lcd.print(Clock()/1000.0); Print("s");
+        if(batteryCount == 0)
+        {
+            Cursor(BOTTOM, 0);
+            batteryVoltage = float(analogRead(BATTERY_SENSOR)) / 1024.0 * 5.0;
+            Print("Battery: "); lcd.print(batteryVoltage); Print("V");
+        }
         #endif
     }
 }
@@ -404,15 +439,15 @@ void CenterSmartUpdate()
         switch(intersectionTurnFlag)
         {
             case INTERSECTION_COUNT_LEFT: // First intersection after left signal
-                currentState = turnLeft;
-                break;
+            currentState = turnLeft;
+            break;
             case INTERSECTION_COUNT_RIGHT: // First intersection after right signal
-                currentState = turnRight;
-                break;
+            currentState = turnRight;
+            break;
             default: // Else
-                currentState = moveStraight;
-                intersectionSignalRecent += 1;
-                break;
+            currentState = moveStraight;
+            intersectionSignalRecent += 1;
+            break;
         }
 
         centerTimeoutCount = 0; // Stop timeout counter
