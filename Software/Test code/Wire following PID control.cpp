@@ -45,6 +45,10 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 SimpleTimer turnSignalTimer;
 bool turnSignalState = false;
 
+// "Clock" speed
+unsigned long loopPeriod;
+unsigned long lastLoop;
+
 enum state
 {
     menu,
@@ -61,30 +65,30 @@ struct Parameter
 }; 
 
 // Prevents LCD flicker
-int lcdRefreshCount = 0;
-int lcdRefreshPeriod = 200;
+short lcdRefreshCount = 0;
+short lcdRefreshPeriod = 200;
 
 // Prevents excess battery readings
-int batteryCount = 0;
-int batteryPeriod = 10000;
+short batteryCount = 0;
+short batteryPeriod = 10000;
 volatile float batteryVoltage = 0.0;
 
 // Sensors
-volatile int left = 0;
-volatile int right = 0;
-volatile int leftDetected = false;
-volatile int rightDetected = false;
+volatile short left = 0;
+volatile short right = 0;
+volatile short leftDetected = false;
+volatile short rightDetected = false;
 
 // Smart intersection detection
 #define INTERSECTION_COUNT_LEFT 3
 #define INTERSECTION_COUNT_RIGHT 2
 #define INTERSECTION_COUNT_ORIGIN 4
-int centerTimeoutLimit = 300;
-volatile int center = 0;
-volatile int centerOldHigh = false;
-volatile int intersectionSignalRecent = 0;
-volatile int centerTimeoutCount = 0;
-volatile int intersectionTurnFlag = 0;
+short centerTimeoutLimit = 300;
+volatile short center = 0;
+volatile short centerOldHigh = false;
+volatile short intersectionSignalRecent = 0;
+volatile short centerTimeoutCount = 0;
+volatile short intersectionTurnFlag = 0;
 
 // Mapped intersection detection
 enum intersectionCommand
@@ -120,16 +124,16 @@ volatile int centerLowDetected = false;
 float proportional = 0.0;
 float integral = 0.0;
 float derivative = 0.0;
-int derivativeCounter = 0;
-int integralOffsetPeriod = 50;
-int integralOffsetCounter = integralOffsetPeriod;
+short derivativeCounter = 0;
+short integralOffsetPeriod = 50;
+short integralOffsetCounter = integralOffsetPeriod;
 
 float error = 0.0;
 float previousError = 0.0;
 
 // State tracking
 state currentState = menu;
-int menuIndex = 0;
+short menuIndex = 0;
 
 // Clock
 volatile unsigned int clockTime = 0;
@@ -156,7 +160,7 @@ Parameter *parameters[] =
 };
 #define PARAMETER_COUNT (sizeof(parameters)/sizeof(Parameter*)) // MUST EQUAL NUMBER OF PARAMETERS
 
-void TurnSignal()
+inline void TurnSignal()
 {
     if (intersectionTurnFlag == INTERSECTION_COUNT_LEFT)
     {
@@ -177,20 +181,20 @@ void TurnSignal()
 }
 
 // Clears the LCD screen
-void Clear()
+inline void Clear()
 {
     lcd.clear();
 }
 
 // Prints a string to the LCD display, with an optional integer value beside it
-void Print(String text, int value = -1) 
+inline void Print(String text, int value = -1) 
 {
     lcd.print(text);
     if (value != -1) lcd.print(value);
 }
 
 // Changes the LCD cursor location
-void Cursor(int row, int column)
+inline void Cursor(int row, int column)
 {
     lcd.setCursor(column, row);
 }
@@ -198,6 +202,10 @@ void Cursor(int row, int column)
 // SETUP
 void setup()
 {
+    // For algorithm speed checking
+    loopPeriod = 0;
+    lastLoop = micros();
+
     // Initialize LCD
     lcd.begin(16, 2);   
     lcd.setCursor(0,0);
@@ -259,10 +267,13 @@ void loop()
         break;
     }
     turnSignalTimer.run();
+
+    loopPeriod = micros() - lastLoop;
+    lastLoop = micros(); 
 }
 
 // Drains the capacitors on the peak detector so that can be read again
-void SensorReset(int microseconds = 10)
+inline void SensorReset(int microseconds = 5)
 {
     digitalWrite(SENSOR_RESET, HIGH);
     delayMicroseconds(microseconds);
@@ -271,7 +282,7 @@ void SensorReset(int microseconds = 10)
 
 // Returns the current button being pressed.
 // Can detect one button being pressed at a time.
-int ReadButton()
+inline int ReadButton()
 {
     int value = analogRead(BUTTON_INPUT);   
     if (value > 1000) return NONE;
@@ -354,11 +365,11 @@ void SaveToEEPROM()
         EEPROM.write(parameters[i]->Index, parameters[i]->Value);
 }
 
-void DisplaySensorValues()
+inline void DisplaySensorValues()
 {
     if(lcdRefreshCount == 0)  // Mitigates screen flicker and time consuming operations
     {
-        #ifdef DEBUG_MODE
+     //   #ifdef DEBUG_MODE
             // Sensors on top line
         Cursor(TOP, 0); 
         Print("L:", left);
@@ -367,7 +378,9 @@ void DisplaySensorValues()
         Print("     ");
 
         Cursor(BOTTOM, 0);
-
+        Print("Loop: ");
+        lcd.print(loopPeriod);
+/*
         #ifdef USE_SMART_INTERSECTIONS
         Print("Signal: ", intersectionTurnFlag);
         #else
@@ -383,12 +396,12 @@ void DisplaySensorValues()
             batteryVoltage = float(analogRead(BATTERY_SENSOR)) / 1024.0 * 5.0;
             Print("Battery: "); lcd.print(batteryVoltage); Print("V");
         }
-        #endif
+        #endif*/
     }
+
 }
 
-
-void CenterMapUpdate()
+inline void CenterMapUpdate()
 {
     center = analogRead(CENTER_SENSOR);
     centerHighDetected = center > centerSchmittHigh.Value;
@@ -427,7 +440,7 @@ void CenterMapUpdate()
     }
 }
 
-void CenterSmartUpdate()
+inline void CenterSmartUpdate()
 {
     center = analogRead(CENTER_SENSOR);
 
@@ -477,15 +490,17 @@ void CenterSmartUpdate()
     }
 }
 
+short centerCheckCount = 0;
+short centerCheckPeriod = 3;
 // Updates the sensors and machine state
 void Update()
-{   
-    if ((currentState != menu) && (ReadButton() == SELECT))
+{
+    if ((lcdRefreshCount == 0) && (currentState != menu) && (ReadButton() == SELECT))
     {
         delay(750);
         if(ReadButton() == SELECT) // debounce MENU button
         {
-        // Stop motors before entering menu
+            // Stop motors before entering menu
             MotorSpeed(LEFT_MOTOR, 0);
             MotorSpeed(RIGHT_MOTOR, 0);
 
@@ -503,14 +518,16 @@ void Update()
     right = analogRead(RIGHT_SENSOR);
     leftDetected = left > thresholdLeft.Value;
     rightDetected = right > thresholdRight.Value;
-    if (leftDetected || rightDetected)
+    if (centerCheckCount <= 0 && (leftDetected || rightDetected))
     {
         #ifdef USE_SMART_INTERSECTIONS
         CenterSmartUpdate();
         #else
         CenterMapUpdate();
         #endif
+        centerCheckCount = centerCheckPeriod;
     }
+    centerCheckCount--;
     SensorReset(); // Drain capacitor in preparation for next sensor reading
 
     // Display values on LCD
@@ -618,7 +635,7 @@ void ProcessMovementAnalog()
 }
 
 // Modifies the motor speed given a value between 0 and 100
-void MotorSpeed(int motor, int speed)
+inline void MotorSpeed(int motor, int speed)
 {
 	if (speed > 1000) speed = 1000;
 	else if (speed < 0) speed = 0;
@@ -634,29 +651,10 @@ void Turn()
 
     Clear();
     Print("TURN");
-	/*
-    // Move past intersection a small amount
-    
-    MotorSpeed(LEFT_MOTOR, 300);
-    MotorSpeed(RIGHT_MOTOR, 300);
-    delay(400);
-
-    // Turn until the line has been lost
-    MotorSpeed(LEFT_MOTOR, direction * 100);
-    MotorSpeed(RIGHT_MOTOR, -direction * 100);
-    do
-    {
-        left = analogRead(LEFT_SENSOR);
-        right = analogRead(RIGHT_SENSOR);
-        leftDetected = left > thresholdLeft.Value;
-        rightDetected = right > thresholdRight.Value;
-        SensorReset();
-    } while (leftDetected || rightDetected);
-    */
 
     MotorSpeed(LEFT_MOTOR, 1000 * direction);
     MotorSpeed(RIGHT_MOTOR, 1000 * -direction);
-    delay(400);
+    delay(700);
 
     previousError = direction;
     currentState = moveStraight;
@@ -664,7 +662,7 @@ void Turn()
     Clear();
 }
 
-unsigned int Clock() // Displays the clock's current value (in milliseconds)
+inline unsigned int Clock() // Displays the clock's current value (in milliseconds)
 {
     if (clockRun)
     {
@@ -677,7 +675,7 @@ unsigned int Clock() // Displays the clock's current value (in milliseconds)
     return clockTime;
 }
 
-void ClockToggle() // Toggles the clock to run or pause
+inline void ClockToggle() // Toggles the clock to run or pause
 {
     if (clockRun) // If clock is currently running
     {
@@ -691,7 +689,7 @@ void ClockToggle() // Toggles the clock to run or pause
     }
 }
 
-void ClockReset() // Sets the clock to 0 and pauses the clock
+inline void ClockReset() // Sets the clock to 0 and pauses the clock
 {
     clockTime = 0;
     clockRun = false;
