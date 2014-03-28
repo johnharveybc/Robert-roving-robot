@@ -9,6 +9,7 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 #define CALCULATE_INTEGRAL_ERROR    // Comment to remove integral gain from error calculations
 #define CALCULATE_ANALOG_PID        // Comment to calculate PID error using boolean logic instead of analog values
 #define USE_SMART_INTERSECTIONS     // Comment to use the intersection map instead of sensing intersection signals
+//#define DEBUG_MODE                  // Comment to display voltage and time instead of debug values
 
 // Pin definitions
 #define LEFT_SENSOR 1       // ANALOG
@@ -54,7 +55,7 @@ struct Parameter
 
 // Prevents LCD flicker
 int lcdRefreshCount = 0;
-int lcdRefreshPeriod = 200;
+int lcdRefreshPeriod = 300;
 
 // Prevents excess battery readings
 int batteryCount = 0;
@@ -68,10 +69,10 @@ volatile int leftDetected = false;
 volatile int rightDetected = false;
 
 // Smart intersection detection
-#define INTERSECTION_COUNT_LEFT 2
-#define INTERSECTION_COUNT_RIGHT 3
+#define INTERSECTION_COUNT_LEFT 3
+#define INTERSECTION_COUNT_RIGHT 2
 #define INTERSECTION_COUNT_ORIGIN 4
-int centerTimeoutLimit = 500;
+int centerTimeoutLimit = 400;
 volatile int center = 0;
 volatile int centerOldHigh = false;
 volatile int intersectionSignalRecent = 0;
@@ -123,6 +124,11 @@ float previousError = 0.0;
 state currentState = menu;
 int menuIndex = 0;
 
+// Clock
+volatile unsigned int clockTime = 0;
+volatile int clockRun = false;
+volatile unsigned int clockStart = 0;
+
 // EEPROM values
 Parameter proportionalGain  = {"P-gain",      0, 1}; 
 Parameter integralGain      = {"I-gain",      0, 2}; 
@@ -149,7 +155,7 @@ void Clear()
     lcd.clear();
 }
 
-// Prints a string to the LCD display, with an optional numerical value beside it
+// Prints a string to the LCD display, with an optional integer value beside it
 void Print(String text, int value = -1) 
 {
     lcd.print(text);
@@ -182,6 +188,9 @@ void setup()
     Cursor(TOP, 0);
     Print("Fast Orange");
     delay(1000);
+
+    currentState = menu;
+    ClockReset();
 }
 
 // LOOP
@@ -307,31 +316,32 @@ void DisplaySensorValues()
 {
     if(lcdRefreshCount == 0)  // Mitigates screen flicker and time consuming operations
     {
-        // Sensors on top line
-        Cursor(TOP, 0); 
-        Print("L:", left);
-        Print(" R:", right);
-        Print(" C:", center);
-        Print("     ");
-        
-        Cursor(BOTTOM, 0);
+        #ifdef DEBUG_MODE
+            // Sensors on top line
+            Cursor(TOP, 0); 
+            Print("L:", left);
+            Print(" R:", right);
+            Print(" C:", center);
+            Print("     ");
+            
+            Cursor(BOTTOM, 0);
 
-        #ifdef USE_SMART_INTERSECTIONS
-            Print("Signal: ", intersectionTurnFlag);
+            #ifdef USE_SMART_INTERSECTIONS
+                Print("Signal: ", intersectionTurnFlag);
+            #else
+                Print("Intersection: ", intersectionIndex + 1);
+            #endif
         #else
-            Print("Intersection: ", intersectionIndex + 1);
+            Cursor(TOP, 0); Print("                "); Cursor(TOP, 0);
+            Print("Time: "); lcd.print(Clock()/1000.0); Print("s");
+            if(batteryCount == 0)
+            {
+                Cursor(BOTTOM, 0);
+                batteryVoltage = float(analogRead(BATTERY_SENSOR)) / 1024.0 * 5.0;
+                Print("Battery: "); lcd.print(batteryVoltage); Print("V");
+            }
         #endif
     }
-
-    
-    // Only update battery voltage once in a while
-    //if(batteryCount == 0)
-    //{
-    //    batteryVoltage = float(analogRead(BATTERY_SENSOR)) / 1024.0 * 5.0;
-        // Battery voltage on bottom line
-    //    Cursor(BOTTOM, 0);
-    //    Print("Batt: "); lcd.print(batteryVoltage); Print("V");
-    //}
 }
 
 
@@ -388,7 +398,7 @@ void CenterSmartUpdate()
         if((intersectionSignalRecent + 1) == INTERSECTION_COUNT_ORIGIN) // If the start/stop signal is encountered, toggle clock.
         // This is done on when it switches high (instead of waiting for timeout) to save a bit of clock-time.
         {
-            //toggleClock();
+            ClockToggle();
         }
 
         switch(intersectionTurnFlag)
@@ -580,14 +590,13 @@ void Turn()
 
     Clear();
     Print("TURN");
-
+	/*
     // Move past intersection a small amount
     
     MotorSpeed(LEFT_MOTOR, 300);
     MotorSpeed(RIGHT_MOTOR, 300);
     delay(400);
 
-    /*
     // Turn until the line has been lost
     MotorSpeed(LEFT_MOTOR, direction * 100);
     MotorSpeed(RIGHT_MOTOR, -direction * 100);
@@ -609,4 +618,37 @@ void Turn()
     currentState = moveStraight;
 
     Clear();
+}
+
+unsigned int Clock() // Displays the clock's current value (in milliseconds)
+{
+    if (clockRun)
+    {
+        unsigned int currentMillis = millis();
+
+        clockTime += currentMillis - clockStart;
+        clockStart = currentMillis;
+    }
+
+    return clockTime;
+}
+
+void ClockToggle() // Toggles the clock to run or pause
+{
+    if (clockRun) // If clock is currently running
+    {
+        clockTime += millis(); - clockStart;
+        clockRun = false;
+    }
+    else
+    {
+        clockRun = true;
+        clockStart = millis();
+    }
+}
+
+void ClockReset() // Sets the clock to 0 and pauses the clock
+{
+    clockTime = 0;
+    clockRun = false;
 }
