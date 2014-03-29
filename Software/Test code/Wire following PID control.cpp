@@ -80,10 +80,10 @@ volatile short leftDetected = false;
 volatile short rightDetected = false;
 
 // Smart intersection detection
-#define INTERSECTION_COUNT_LEFT 3
-#define INTERSECTION_COUNT_RIGHT 2
+#define INTERSECTION_COUNT_LEFT 2
+#define INTERSECTION_COUNT_RIGHT 3
 #define INTERSECTION_COUNT_ORIGIN 4
-short centerTimeoutLimit = 300;
+
 volatile short center = 0;
 volatile short centerOldHigh = false;
 volatile short intersectionSignalRecent = 0;
@@ -141,22 +141,23 @@ volatile int clockRun = false;
 volatile unsigned int clockStart = 0;
 
 // EEPROM values
-Parameter proportionalGain  = {"P-gain",      0, 1}; 
-Parameter integralGain      = {"I-gain",      0, 2}; 
-Parameter derivativeGain    = {"D-gain",      0, 3}; 
-Parameter speed             = {"Speed",       0, 4}; 
-Parameter thresholdLeft     = {"L-Thresh",    0, 5}; 
-Parameter thresholdRight    = {"R-Thresh",    0, 6}; 
-Parameter centerSchmittHigh = {"C-Schmitt H", 0, 7};
-Parameter centerSchmittLow  = {"C-Schmitt L", 0, 8};
-Parameter integralCap       = {"I-Cap",       0, 9};
+Parameter proportionalGain   = {"P-gain",      0, 1}; 
+Parameter integralGain       = {"I-gain",      0, 2}; 
+Parameter derivativeGain     = {"D-gain",      0, 3}; 
+Parameter speed              = {"Speed",       0, 4}; 
+Parameter thresholdLeft      = {"L-Thresh",    0, 5}; 
+Parameter thresholdRight     = {"R-Thresh",    0, 6}; 
+Parameter centerSchmittHigh  = {"C-Schmitt H", 0, 7};
+Parameter centerSchmittLow   = {"C-Schmitt L", 0, 8};
+Parameter integralCap        = {"I-Cap",       0, 9};
+Parameter centerTimeoutLimit = {"Timeout",     0, 10};
 
 // Make sure any EEPROM value is added to the array
 Parameter *parameters[] = 
 {
     &proportionalGain, &integralGain, &derivativeGain,
     &speed, &thresholdLeft, &thresholdRight, &centerSchmittHigh, 
-    &centerSchmittLow, &integralCap
+    &centerSchmittLow, &integralCap, &centerTimeoutLimit
 };
 #define PARAMETER_COUNT (sizeof(parameters)/sizeof(Parameter*)) // MUST EQUAL NUMBER OF PARAMETERS
 
@@ -273,7 +274,7 @@ void loop()
 }
 
 // Drains the capacitors on the peak detector so that can be read again
-inline void SensorReset(int microseconds = 5)
+inline void SensorReset(int microseconds = 15)
 {
     digitalWrite(SENSOR_RESET, HIGH);
     delayMicroseconds(microseconds);
@@ -342,7 +343,8 @@ void ShowMenu()
             SaveToEEPROM(); // Save values to EEPROM before exiting
             delay(750);
             currentState = moveStraight;
-            ClockToggle();
+            intersectionTurnFlag = 0;
+            //ClockToggle();
             Clear();
             return;
         }
@@ -369,18 +371,10 @@ inline void DisplaySensorValues()
 {
     if(lcdRefreshCount == 0)  // Mitigates screen flicker and time consuming operations
     {
-     //   #ifdef DEBUG_MODE
-            // Sensors on top line
-        Cursor(TOP, 0); 
-        Print("L:", left);
-        Print(" R:", right);
-        Print(" C:", center);
-        Print("     ");
-
+        #ifdef DEBUG_MODE
+        // Sensors on top line        
         Cursor(BOTTOM, 0);
-        Print("Loop: ");
-        lcd.print(loopPeriod);
-/*
+
         #ifdef USE_SMART_INTERSECTIONS
         Print("Signal: ", intersectionTurnFlag);
         #else
@@ -390,15 +384,16 @@ inline void DisplaySensorValues()
         #else
         Cursor(TOP, 0); Print("                "); Cursor(TOP, 0);
         Print("Time: "); lcd.print(Clock()/1000.0); Print("s");
-        if(batteryCount == 0)
-        {
-            Cursor(BOTTOM, 0);
-            batteryVoltage = float(analogRead(BATTERY_SENSOR)) / 1024.0 * 5.0;
-            Print("Battery: "); lcd.print(batteryVoltage); Print("V");
-        }
-        #endif*/
+        #endif
     }
-
+    #ifndef DEBUG_MODE
+    if(batteryCount == 0)
+    {
+        Cursor(BOTTOM, 0);
+        batteryVoltage = float(analogRead(BATTERY_SENSOR)) / 1024.0 * 5.0;
+        Print("Battery: "); lcd.print(batteryVoltage); Print("V");
+    }
+    #endif
 }
 
 inline void CenterMapUpdate()
@@ -480,7 +475,7 @@ inline void CenterSmartUpdate()
         centerTimeoutCount = 1; // Start timeout counter
     }
 
-    if (centerTimeoutCount >= centerTimeoutLimit) // Timeout
+    if (centerTimeoutCount >= (centerTimeoutLimit.Value * 2)) // Timeout
     {
         if (intersectionTurnFlag < intersectionSignalRecent) // Do not let false signals effect the flag
             intersectionTurnFlag = intersectionSignalRecent; // Set flag
@@ -490,8 +485,6 @@ inline void CenterSmartUpdate()
     }
 }
 
-short centerCheckCount = 0;
-short centerCheckPeriod = 3;
 // Updates the sensors and machine state
 void Update()
 {
@@ -518,16 +511,14 @@ void Update()
     right = analogRead(RIGHT_SENSOR);
     leftDetected = left > thresholdLeft.Value;
     rightDetected = right > thresholdRight.Value;
-    if (centerCheckCount <= 0 && (leftDetected || rightDetected))
+    if (leftDetected || rightDetected)
     {
         #ifdef USE_SMART_INTERSECTIONS
         CenterSmartUpdate();
         #else
         CenterMapUpdate();
         #endif
-        centerCheckCount = centerCheckPeriod;
     }
-    centerCheckCount--;
     SensorReset(); // Drain capacitor in preparation for next sensor reading
 
     // Display values on LCD
@@ -679,7 +670,7 @@ inline void ClockToggle() // Toggles the clock to run or pause
 {
     if (clockRun) // If clock is currently running
     {
-        clockTime += millis(); - clockStart;
+        clockTime += millis() - clockStart;
         clockRun = false;
     }
     else
