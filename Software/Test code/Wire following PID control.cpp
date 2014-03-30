@@ -645,7 +645,7 @@ void Turn()
 
     MotorSpeed(LEFT_MOTOR, 1000 * direction);
     MotorSpeed(RIGHT_MOTOR, 1000 * -direction);
-    delay(700);
+    delay(550);
 
     previousError = direction;
     currentState = moveStraight;
