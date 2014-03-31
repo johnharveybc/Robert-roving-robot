@@ -8,8 +8,6 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 #define SUBTRACTIVE_MOTOR_SPEED     // Comment for additive and subtractive motor speed
 #define CALCULATE_DERIVATIVE_ERROR  // Comment to remove derivative gain from error calculations
 #define CALCULATE_INTEGRAL_ERROR    // Comment to remove integral gain from error calculations
-#define CALCULATE_ANALOG_PID        // Comment to calculate PID error using boolean logic instead of analog values
-#define USE_SMART_INTERSECTIONS     // Comment to use the intersection map instead of sensing intersection signals
 //#define DEBUG_MODE                  // Comment to display voltage and time instead of debug values
 
 // Pin definitions
@@ -20,7 +18,6 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 #define BUTTON_INPUT 0      // ANALOG
 #define LEFT_MOTOR 11       // PWM
 #define RIGHT_MOTOR 3       // PWM
-#define SENSOR_RESET 2      // DIGITAL
 #define LEFT_TURN_LED 12     // DIGITAL
 #define RIGHT_TURN_LED 13    // DIGITAL
 
@@ -57,7 +54,7 @@ enum state
     turnRight
 };
 
-struct Parameter 
+struct Parameter
 {
     String Name;
     byte Value;
@@ -69,7 +66,7 @@ short lcdRefreshCount = 0;
 short lcdRefreshPeriod = 200;
 
 // Prevents excess battery readings
-short batteryCount = 0;
+short batteryCount = 10;
 short batteryPeriod = 10000;
 volatile float batteryVoltage = 0.0;
 
@@ -90,36 +87,6 @@ volatile short intersectionSignalRecent = 0;
 volatile short centerTimeoutCount = 0;
 volatile short intersectionTurnFlag = 0;
 
-// Mapped intersection detection
-enum intersectionCommand
-{
-    straight,
-    leftTurn,
-    rightTurn,
-    stop
-};
-
-int intersections[] =
-{
-    straight,
-    straight,
-    straight,
-    straight,
-    straight,
-    leftTurn,
-    straight,
-    straight,
-    rightTurn,
-    straight,
-    straight,
-};
-#define INTERSECTION_COUNT (sizeof(intersections)/sizeof(int)) // MUST EQUAL NUMBER OF PARAMETERS
-int intersectionIndex = -1;
-volatile int centerNew = false;
-volatile int centerRisingEdge = false;
-volatile int centerHighDetected = false;
-volatile int centerLowDetected = false;
-
 // Control
 float proportional = 0.0;
 float integral = 0.0;
@@ -136,9 +103,12 @@ state currentState = menu;
 short menuIndex = 0;
 
 // Clock
-volatile unsigned int clockTime = 0;
+/*volatile unsigned int clockTime = 0;
 volatile int clockRun = false;
 volatile unsigned int clockStart = 0;
+*/
+SimpleTimer lapTimer;
+long lapTime;
 
 // EEPROM values
 Parameter proportionalGain   = {"P-gain",      0, 1}; 
@@ -151,13 +121,14 @@ Parameter centerSchmittHigh  = {"C-Schmitt H", 0, 7};
 Parameter centerSchmittLow   = {"C-Schmitt L", 0, 8};
 Parameter integralCap        = {"I-Cap",       0, 9};
 Parameter centerTimeoutLimit = {"Timeout",     0, 10};
+Parameter turnTime           = {"Turn time",   0, 11};
 
 // Make sure any EEPROM value is added to the array
 Parameter *parameters[] = 
 {
     &proportionalGain, &integralGain, &derivativeGain,
     &speed, &thresholdLeft, &thresholdRight, &centerSchmittHigh, 
-    &centerSchmittLow, &integralCap, &centerTimeoutLimit
+    &centerSchmittLow, &integralCap, &centerTimeoutLimit, &turnTime
 };
 #define PARAMETER_COUNT (sizeof(parameters)/sizeof(Parameter*)) // MUST EQUAL NUMBER OF PARAMETERS
 
@@ -179,6 +150,12 @@ inline void TurnSignal()
         digitalWrite(RIGHT_TURN_LED, 0);
     }
     turnSignalState = !turnSignalState;
+}
+
+// Increment lap time
+void IncrementTime()
+{
+    lapTime++;
 }
 
 // Clears the LCD screen
@@ -207,17 +184,20 @@ void setup()
     loopPeriod = 0;
     lastLoop = micros();
 
+    // Lap timer
+    lapTimer.setInterval(100, IncrementTime);
+    lapTimer.disable(0);
+
     // Initialize LCD
     lcd.begin(16, 2);   
     lcd.setCursor(0,0);
-    pinMode(SENSOR_RESET, OUTPUT);
     
     // Turn signals
     pinMode(LEFT_TURN_LED, OUTPUT);
     pinMode(RIGHT_TURN_LED, OUTPUT);
     digitalWrite(LEFT_TURN_LED, 0);
     digitalWrite(RIGHT_TURN_LED, 0);
-    turnSignalTimer.setInterval(100, TurnSignal);
+    turnSignalTimer.setInterval(50, TurnSignal);
 
     // Force motors off by default
     MotorSpeed(LEFT_MOTOR, 0);
@@ -239,7 +219,6 @@ void setup()
     delay(1000);
 
     currentState = menu;
-    ClockReset();
 }
 
 // LOOP
@@ -255,11 +234,7 @@ void loop()
 
         case moveStraight:
         Update();
-            #ifdef CALCULATE_ANALOG_PID
         ProcessMovementAnalog();
-            #else
-        ProcessMovementDigital();
-            #endif
         break;
 
         case turnLeft:
@@ -268,18 +243,9 @@ void loop()
         break;
     }
     turnSignalTimer.run();
-
-    loopPeriod = micros() - lastLoop;
-    lastLoop = micros(); 
+    lapTimer.run();
 }
 
-// Drains the capacitors on the peak detector so that can be read again
-inline void SensorReset(int microseconds = 15)
-{
-    digitalWrite(SENSOR_RESET, HIGH);
-    delayMicroseconds(microseconds);
-    digitalWrite(SENSOR_RESET, LOW);
-}
 
 // Returns the current button being pressed.
 // Can detect one button being pressed at a time.
@@ -313,7 +279,8 @@ void ShowMenu()
     Print(" ", analogRead(LEFT_SENSOR));
     Print(" ", analogRead(RIGHT_SENSOR));
     Print(" ", analogRead(CENTER_SENSOR));
-    SensorReset();
+    Print(" ");
+    lcd.print(float(lapTime)/10.0); Print("s");
 
     switch(ReadButton())
     {
@@ -344,7 +311,8 @@ void ShowMenu()
             delay(750);
             currentState = moveStraight;
             intersectionTurnFlag = 0;
-            //ClockToggle();
+            lapTime = 0;
+            batteryCount = 1;
             Clear();
             return;
         }
@@ -383,7 +351,7 @@ inline void DisplaySensorValues()
         
         #else
         Cursor(TOP, 0); Print("                "); Cursor(TOP, 0);
-        Print("Time: "); lcd.print(Clock()/1000.0); Print("s");
+        Print("Time: "); lcd.print(float(lapTime)/10.0); Print("s");
         #endif
     }
     #ifndef DEBUG_MODE
@@ -394,45 +362,6 @@ inline void DisplaySensorValues()
         Print("Battery: "); lcd.print(batteryVoltage); Print("V");
     }
     #endif
-}
-
-inline void CenterMapUpdate()
-{
-    center = analogRead(CENTER_SENSOR);
-    centerHighDetected = center > centerSchmittHigh.Value;
-    centerLowDetected  = center > centerSchmittLow.Value;
-
-    if(!centerLowDetected)
-    {
-        centerNew = true;
-    }
-
-    if(centerNew && centerHighDetected)
-    {
-        delay(50);
-        if (analogRead(CENTER_SENSOR) > centerSchmittHigh.Value)
-        {
-            centerRisingEdge = true;
-            delay(50);
-            centerNew = false;
-            intersectionIndex++;
-            if (intersectionIndex == INTERSECTION_COUNT) 
-                intersectionIndex = 0;
-            
-            switch(intersections[intersectionIndex])
-            {
-                case straight:
-                currentState = moveStraight;
-                break;
-                case leftTurn:
-                currentState = turnLeft;
-                break;
-                case rightTurn:
-                currentState = turnRight;
-                break;
-            }
-        }
-    }
 }
 
 inline void CenterSmartUpdate()
@@ -449,7 +378,21 @@ inline void CenterSmartUpdate()
         if((intersectionSignalRecent + 1) == INTERSECTION_COUNT_ORIGIN) // If the start/stop signal is encountered, toggle clock.
         // This is done on when it switches high (instead of waiting for timeout) to save a bit of clock-time.
         {
-            ClockToggle();
+            lapTimer.toggle(0);
+            if (!lapTimer.isEnabled(0))
+            {
+               // Stop motors before entering menu
+                MotorSpeed(LEFT_MOTOR, 0);
+                MotorSpeed(RIGHT_MOTOR, 0);
+
+                Clear();
+                Cursor(TOP, 0);
+                Print("Finish!");
+                currentState = menu;
+                delay(800);
+                return;
+            }
+
         }
 
         switch(intersectionTurnFlag)
@@ -502,7 +445,8 @@ void Update()
             Print("Entering menu");
             currentState = menu;
             delay(1000);
-            ClockReset();    
+            lapTimer.disable(0);
+            return;
         }
     }
 
@@ -513,78 +457,13 @@ void Update()
     rightDetected = right > thresholdRight.Value;
     if (leftDetected || rightDetected)
     {
-        #ifdef USE_SMART_INTERSECTIONS
         CenterSmartUpdate();
-        #else
-        CenterMapUpdate();
-        #endif
     }
-    SensorReset(); // Drain capacitor in preparation for next sensor reading
 
     // Display values on LCD
     lcdRefreshCount = (lcdRefreshCount <= 0) ? lcdRefreshPeriod : (lcdRefreshCount - 1);
     batteryCount = (batteryCount <= 0) ? batteryPeriod : (batteryCount - 1);
     DisplaySensorValues();   
-}
-
-// Calculates PID values for a single iteration of movement
-void ProcessMovementDigital()
-{
-    if (leftDetected && rightDetected) error = 0; // No error if both sensors see the wire
-    else if (!leftDetected && rightDetected) error = TOO_LEFT;
-    else if (leftDetected && !rightDetected) error = TOO_RIGHT;
-    else if (!leftDetected && !rightDetected) error = (previousError <= TOO_LEFT) ? -OFF_WIRE : OFF_WIRE;
-
-    // Proportional
-    proportional = error * float(proportionalGain.Value);
-
-    // Integral
-    #ifdef CALCULATE_INTEGRAL_ERROR    
-    if (integralOffsetCounter < 0)
-    {
-        integral += (error * integralGain.Value);
-        integralOffsetCounter = integralOffsetPeriod;
-    }
-    else
-    { 
-        integralOffsetCounter--;
-    }
-
-    if (integral > integralCap.Value) 
-        integral = integralCap.Value;
-    else if (integral < -integralCap.Value) 
-        integral = -integralCap.Value;
-    #else
-    integral = 0;
-    #endif
-
-    // Derivative
-    #ifdef CALCULATE_DERIVATIVE_ERROR
-    derivative = (error - previousError) / float(derivativeCounter) * float(derivativeGain.Value);
-    #else
-    derivative = 0;
-    #endif
-
-    int baseSpeed = (speed.Value * 4.0);
-    int mLeft  = baseSpeed + (proportional + derivative + integral);
-    int mRight = baseSpeed - (proportional + derivative + integral);
-
-    #ifdef SUBTRACTIVE_MOTOR_SPEED
-    if (mLeft > mRight) 
-        mLeft = baseSpeed;
-    else
-        mRight = baseSpeed;
-    #endif
-
-    MotorSpeed(LEFT_MOTOR, mLeft);
-    MotorSpeed(RIGHT_MOTOR, mRight);
-    
-    if(previousError != error)
-    {
-        previousError = error;
-        derivativeCounter = 1;
-    }
-    else derivativeCounter++;
 }
 
 void ProcessMovementAnalog()
@@ -593,7 +472,7 @@ void ProcessMovementAnalog()
     else error = float(left) - float(right);
 
     // Proportional
-    proportional = error * float(proportionalGain.Value);
+    proportional = error * float(proportionalGain.Value) / 10.0;
     derivative = (error - previousError) * float(derivativeGain.Value) / 50.0;
     integral += (error * float(integralGain.Value)) / 50.0;
     
@@ -610,7 +489,12 @@ void ProcessMovementAnalog()
     derivative = 0;
     #endif;
 
-    int baseSpeed = (speed.Value * 4.0);
+    int baseSpeed;
+    if (center > centerSchmittHigh.Value)
+        baseSpeed = 1000;
+    else    
+        baseSpeed = (speed.Value * 4.0);
+
     int mLeft  = baseSpeed + (proportional + derivative + integral);
     int mRight = baseSpeed - (proportional + derivative + integral);
 
@@ -635,6 +519,9 @@ inline void MotorSpeed(int motor, int speed)
 
 void Turn()
 {
+    turnSignalState = true;
+    TurnSignal();
+
     int direction;
     if (currentState == turnLeft) direction = 1;
     else if (currentState == turnRight) direction = -1;
@@ -645,43 +532,11 @@ void Turn()
 
     MotorSpeed(LEFT_MOTOR, 1000 * direction);
     MotorSpeed(RIGHT_MOTOR, 1000 * -direction);
-    delay(550);
+    delay(4.0 * turnTime.Value);
 
     previousError = direction;
+    integral = 0;
     currentState = moveStraight;
-
     Clear();
 }
 
-inline unsigned int Clock() // Displays the clock's current value (in milliseconds)
-{
-    if (clockRun)
-    {
-        unsigned int currentMillis = millis();
-
-        clockTime += currentMillis - clockStart;
-        clockStart = currentMillis;
-    }
-
-    return clockTime;
-}
-
-inline void ClockToggle() // Toggles the clock to run or pause
-{
-    if (clockRun) // If clock is currently running
-    {
-        clockTime += millis() - clockStart;
-        clockRun = false;
-    }
-    else
-    {
-        clockRun = true;
-        clockStart = millis();
-    }
-}
-
-inline void ClockReset() // Sets the clock to 0 and pauses the clock
-{
-    clockTime = 0;
-    clockRun = false;
-}
